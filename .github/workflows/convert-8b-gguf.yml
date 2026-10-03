@@ -55,11 +55,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Install converter dependencies (python3 + numpy only)
+      # The converter's own docstring claims stdlib+numpy only, but
+      # lora_mlx_to_gguf.py:176 does `from gguf import GGUFReader` inside
+      # verify_against_base(), so the `gguf` package is a hard requirement.
+      - name: Install converter dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy "huggingface_hub[cli]"
-          python -c "import numpy; print('numpy', numpy.__version__)"
+          pip install numpy gguf "huggingface_hub[cli]"
+          python -c "import numpy, gguf; print('numpy', numpy.__version__); print('gguf', gguf.__version__)"
 
       - name: Download the 8B checkpoint (~4.3 GB)
         env:
