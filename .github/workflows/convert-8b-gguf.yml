@@ -16,8 +16,14 @@ permissions:
 
 env:
   HF_REPO: cipher-000/edge0-8b-a1b-gguf
-  SRC_DIR: models/edge0-8b
-  OUT_DIR: models/edge0-8b-gguf
+  # lora_mlx_to_gguf.py:177 derives the base GGUF path as
+  #   root = dirname(dirname(__file__))          -> <repo>/windows
+  #   base = <root>/models/<stem>-gguf/<stem>.gguf
+  # i.e. it hardcodes that the model tree lives under windows/. Placing the
+  # checkpoint anywhere else makes the cross-check gate look in the wrong
+  # directory and die with FileNotFoundError. So keep the tree under windows/.
+  SRC_DIR: windows/models/edge0-8b
+  OUT_DIR: windows/models/edge0-8b-gguf
 
 jobs:
   convert:
@@ -113,9 +119,9 @@ jobs:
         with:
           name: convert-diagnostics
           path: |
-            models/edge0-8b-gguf/manifest.json
-            models/edge0-8b-gguf/edge0-8b-audit.json
-            models/edge0-8b-gguf/convert.log
+            windows/models/edge0-8b-gguf/manifest.json
+            windows/models/edge0-8b-gguf/edge0-8b-audit.json
+            windows/models/edge0-8b-gguf/convert.log
           if-no-files-found: warn
           retention-days: 14
 
