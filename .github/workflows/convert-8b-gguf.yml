@@ -62,7 +62,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install numpy gguf "huggingface_hub[cli]"
-          python -c "import numpy, gguf; print('numpy', numpy.__version__); print('gguf', gguf.__version__)"
+          python -c "import numpy, gguf; from importlib.metadata import version; print('numpy', numpy.__version__); print('gguf', version('gguf'))"
 
       - name: Download the 8B checkpoint (~4.3 GB)
         env:
