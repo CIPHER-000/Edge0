@@ -1,0 +1,121 @@
+name: Convert Edge0 8B to GGUF and publish
+
+# Runs Edge0's own MLX -> GGUF converter on a hosted runner (which has the
+# ~10 GB of scratch space the conversion needs) and publishes the result to
+# Hugging Face. The phone then downloads it over plain HTTPS.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/convert-8b-gguf.yml'
+
+permissions:
+  contents: read
+
+env:
+  HF_REPO: cipher-000/edge0-8b-a1b-gguf
+  SRC_DIR: models/edge0-8b
+  OUT_DIR: models/edge0-8b-gguf
+
+jobs:
+  convert:
+    name: Convert 8B checkpoint to GGUF
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+
+    steps:
+      - name: Report disk before
+        run: df -h /
+
+      # The conversion needs the 4.3 GB source and the ~5 GB output resident at
+      # the same time. The runner ships ~14 GB free, so reclaim the toolchains
+      # this job does not use - the preinstalled Android SDK alone is ~10 GB.
+      - name: Free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          sudo rm -rf /usr/local/share/powershell || true
+          sudo docker image prune -af || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install converter dependencies (python3 + numpy only)
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy "huggingface_hub[cli]"
+          python -c "import numpy; print('numpy', numpy.__version__)"
+
+      - name: Download the 8B checkpoint (~4.3 GB)
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          hf download Edge0/Edge0-8B-A1B-preview --local-dir "$SRC_DIR"
+          ls -la "$SRC_DIR"
+          du -sh "$SRC_DIR"
+          df -h /
+
+      - name: Convert MLX -> GGUF (Edge0's own converter)
+        run: |
+          python windows/tools/convert_mlx_to_gguf.py --dir "$SRC_DIR"
+          echo "--- artefacts ---"
+          ls -la "$OUT_DIR"
+          df -h /
+
+      - name: Show converter audit + manifest
+        run: |
+          echo "=== manifest.json ==="
+          cat "$OUT_DIR/manifest.json"
+          echo
+          echo "=== audit (if present) ==="
+          cat "$OUT_DIR/edge0-8b-audit.json" 2>/dev/null || echo "(no audit file)"
+
+      - name: Fail loudly if expected artefacts are missing
+        run: |
+          set -e
+          test -f "$OUT_DIR/edge0-8b.gguf" || { echo "MISSING edge0-8b.gguf"; exit 1; }
+          test -f "$OUT_DIR/lora_edge0_8b-gguf.gguf" || { echo "MISSING lora adapter"; exit 1; }
+          echo "both artefacts present"
+
+      - name: Publish to Hugging Face
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if hf upload-large-folder --help >/dev/null 2>&1; then
+            echo "using upload-large-folder (resumable)"
+            hf upload-large-folder "$HF_REPO" "$OUT_DIR" --repo-type model
+          else
+            echo "using upload"
+            hf upload "$HF_REPO" "$OUT_DIR" . --repo-type model
+          fi
+
+      - name: Upload small diagnostics artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: convert-diagnostics
+          path: |
+            models/edge0-8b-gguf/manifest.json
+            models/edge0-8b-gguf/edge0-8b-audit.json
+            models/edge0-8b-gguf/convert.log
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Report disk after
+        if: always()
+        run: df -h /
