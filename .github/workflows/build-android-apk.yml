@@ -1,0 +1,124 @@
+name: Build Edge0 Android APK
+
+# Builds the Edge0 Android app (Compose UI + patched llama.cpp native engine)
+# entirely on a GitHub-hosted runner, so no local Android toolchain is needed.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-android-apk.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  build-apk:
+    name: Build debug APK (arm64-v8a)
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    env:
+      # build_vendor_libs.sh defaults the depot root to `cd .. && pwd -W`, and
+      # `pwd -W` is a Git Bash/MSYS-only flag that does not exist on Linux.
+      # Setting this explicitly avoids that code path entirely.
+      EDGE0_DEPOT: ${{ github.workspace }}
+      NDK_VERSION: '28.2.13676358'
+
+    steps:
+      - name: Report runner disk before
+        run: df -h /
+
+      # The hosted runner ships ~14 GB free. The Android SDK + NDK + Gradle +
+      # a full llama.cpp rebuild does not fit comfortably, so reclaim the
+      # preinstalled toolchains we do not use.
+      - name: Free disk space
+        run: |
+          set -x
+          sudo rm -rf /usr/share/dotnet || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /usr/local/share/boost || true
+          sudo rm -rf /usr/local/lib/android/sdk/ndk/* || true
+          sudo rm -rf /usr/local/lib/android/sdk/system-images || true
+          sudo rm -rf /usr/local/lib/android/sdk/emulator || true
+          sudo apt-get clean
+          df -h /
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+
+      - name: Install NDK r28c, CMake, platform 35, build-tools 35
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager --install \
+            "ndk;${NDK_VERSION}" \
+            "cmake;3.22.1" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+          # `cmake`/`ninja` on PATH are needed by build_vendor_libs.sh itself,
+          # which invokes them directly rather than through Gradle.
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build git
+          echo "NDK_DIR=${ANDROID_SDK_ROOT}/ndk/${NDK_VERSION}" >> "$GITHUB_ENV"
+          df -h /
+
+      - name: Verify toolchain
+        run: |
+          set -e
+          echo "cmake : $(cmake --version | head -1)"
+          echo "ninja : $(ninja --version)"
+          echo "java  : $(java -version 2>&1 | head -1)"
+          echo "NDK   : $NDK_DIR"
+          test -d "$NDK_DIR" || { echo "NDK missing"; exit 1; }
+          ls "$NDK_DIR/toolchains/llvm/prebuilt/"*/lib/clang/*/lib/linux/aarch64/libomp.so
+
+      - name: Configure git identity (git am needs it)
+        run: |
+          git config --global user.email "ci@edge0.local"
+          git config --global user.name "edge0 ci"
+
+      - name: Build native engine (pinned llama.cpp + 20 patch bands)
+        working-directory: android
+        run: bash tools/llama/build_vendor_libs.sh
+
+      - name: Verify engine artefacts
+        run: |
+          set -e
+          ls -la android/build-dl/llama-libs/arm64-v8a/
+          for so in libllama.so libggml.so libggml-base.so libggml-cpu.so libomp.so; do
+            test -f "android/build-dl/llama-libs/arm64-v8a/$so" || { echo "MISSING $so"; exit 1; }
+          done
+          echo "All five shared libraries present."
+          df -h /
+
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: edge0-app-debug-apk
+          path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Report runner disk after
+        if: always()
+        run: df -h /
